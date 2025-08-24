@@ -1,4 +1,4 @@
-name: Build and Release Crash System
+name: Build and Release NASM 64-bit Crash System
 
 on:
   push:
@@ -10,39 +10,8 @@ permissions:
   contents: write  # Diperlukan untuk membuat release
 
 jobs:
-  check-tag:
-    runs-on: ubuntu-latest
-    outputs:
-      tag_exists: ${{ steps.check-tag.outputs.exists }}
-      tag_name: ${{ steps.get-tag.outputs.tag_name }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Check if tag exists
-        id: check-tag
-        run: |
-          if [ -n "${{ github.ref_type }}" ] && [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Get tag name
-        id: get-tag
-        run: |
-          if [ -n "${{ github.ref_name }}" ]; then
-            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag_name=dev-build" >> $GITHUB_OUTPUT
-          fi
-
-  build:
+  build-nasm-64bit:
     runs-on: windows-latest
-    needs: check-tag
-    if: needs.check-tag.outputs.tag_exists == 'true'
     
     steps:
     - name: Checkout code
@@ -50,117 +19,89 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Setup MASM32
+    - name: Setup NASM
       run: |
-        # Download dan install MASM32
-        Invoke-WebRequest -Uri "http://www.masm32.com/masmdl.exe" -OutFile "masmdl.exe"
-        Start-Process -Wait -FilePath "masmdl.exe" -ArgumentList "/silent"
-        echo "MASM32_PATH=C:\masm32" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "C:\masm32\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        # Download dan install NASM
+        Invoke-WebRequest -Uri "https://www.nasm.us/pub/nasm/releasebuilds/2.16.01/win64/nasm-2.16.01-win64.zip" -OutFile "nasm.zip"
+        Expand-Archive -Path nasm.zip -DestinationPath nasm
+        echo "C:\nasm" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-    - name: Compile ASM code
+    - name: Setup GoLink (optional linker)
       run: |
-        ml /c /coff crash.asm
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-        link /subsystem:windows crash.obj
-        if ($LASTEXITCODE -ne 0) { exit 1 }
+        # Download GoLink
+        Invoke-WebRequest -Uri "https://github.com/achappell/Golink/releases/download/v1.0.5/golink.exe" -OutFile "golink.exe"
+        echo "C:\golink.exe" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Compile with NASM
+      run: |
+        nasm -f win64 crash2.asm -o crash.obj
+
+    - name: Link with GoLink
+      run: |
+        golink /console /entry main crash.obj kernel32.dll user32.dll advapi32.dll gdi32.dll
 
     - name: Extract version from tag
       id: get_version
       run: |
-        $tag = "${{ needs.check-tag.outputs.tag_name }}"
-        $version = $tag -replace '^v', ''
-        echo "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "version=$version" >> $env:GITHUB_OUTPUT
+        if ("${{ github.ref_type }}" -eq "tag") {
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          echo "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+        } else {
+          echo "VERSION=dev" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "version=dev" >> $env:GITHUB_OUTPUT
+        }
 
     - name: Rename binary with version
       run: |
-        Move-Item -Path crash.exe -Destination "crash-${{ env.VERSION }}.exe"
+        if ("${{ env.VERSION }}" -ne "dev") {
+          Move-Item -Path crash.exe -Destination "crash-${{ env.VERSION }}-x64.exe"
+        } else {
+          $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+          Move-Item -Path crash.exe -Destination "crash-dev-$timestamp-x64.exe"
+        }
 
     - name: Create checksum
       run: |
-        Get-FileHash -Path "crash-${{ env.VERSION }}.exe" -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ASCII "crash-${{ env.VERSION }}.sha256"
+        if ("${{ env.VERSION }}" -ne "dev") {
+          Get-FileHash -Path "crash-${{ env.VERSION }}-x64.exe" -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ASCII "crash-${{ env.VERSION }}-x64.sha256"
+        } else {
+          Get-FileHash -Path "crash-dev-*-x64.exe" -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ASCII "crash-dev-$timestamp-x64.sha256"
+        }
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v3
       with:
-        name: crash-system-${{ env.VERSION }}
+        name: crash-system-${{ env.VERSION }}-x64
         path: |
-          crash-${{ env.VERSION }}.exe
-          crash-${{ env.VERSION }}.sha256
+          crash-*.exe
+          crash-*.sha256
           crash.asm
 
-  create-release:
-    runs-on: ubuntu-latest
-    needs: [check-tag, build]
-    if: needs.check-tag.outputs.tag_exists == 'true'
-    
-    steps:
-    - name: Download build artifacts
-      uses: actions/download-artifact@v3
-      with:
-        name: crash-system-${{ needs.check-tag.outputs.tag_name }}
-
     - name: Create release
-      id: create_release
+      if: github.ref_type == 'tag'
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ needs.check-tag.outputs.tag_name }}
-        name: Crash System ${{ needs.check-tag.outputs.tag_name }}
+        tag_name: ${{ github.ref_name }}
+        name: Crash System ${{ github.ref_name }} (64-bit)
         body: |
            **WARNING: HIGHLY DESTRUCTIVE SOFTWARE** 
           
-          This release contains code that will:
+          64-bit NASM version. This release contains code that will:
           - Create intense visual and audio glitches
           - Overwrite the Master Boot Record (MBR)
           - Cause permanent system damage
           
           **ONLY USE IN CONTROLLED VIRTUAL ENVIRONMENTS**
           
-          Version: ${{ needs.check-tag.outputs.tag_name }}
+          Version: ${{ github.ref_name }}
+          Architecture: x64
           Build date: ${{ github.event.head_commit.timestamp }}
-          SHA256: $(cat crash-${{ needs.check-tag.outputs.tag_name }}.sha256)
+          SHA256: $(cat crash-${{ env.VERSION }}-x64.sha256)
         files: |
-          crash-${{ needs.check-tag.outputs.tag_name }}.exe
-          crash-${{ needs.check-tag.outputs.tag_name }}.sha256
+          crash-${{ env.VERSION }}-x64.exe
+          crash-${{ env.VERSION }}-x64.sha256
           crash.asm
         draft: false
         prerelease: false
-
-  no-tag-build:
-    runs-on: windows-latest
-    needs: check-tag
-    if: needs.check-tag.outputs.tag_exists == 'false' && github.event_name == 'workflow_dispatch'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Setup MASM32
-      run: |
-        Invoke-WebRequest -Uri "http://www.masm32.com/masmdl.exe" -OutFile "masmdl.exe"
-        Start-Process -Wait -FilePath "masmdl.exe" -ArgumentList "/silent"
-        echo "MASM32_PATH=C:\masm32" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "C:\masm32\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-    - name: Compile ASM code
-      run: |
-        ml /c /coff crash.asm
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-        link /subsystem:windows crash.obj
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-
-    - name: Create dev build
-      run: |
-        $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-        Move-Item -Path crash.exe -Destination "crash-dev-$timestamp.exe"
-        Get-FileHash -Path "crash-dev-$timestamp.exe" -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ASCII "crash-dev-$timestamp.sha256"
-
-    - name: Upload dev build artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: crash-dev-build
-        path: |
-          crash-dev-*.exe
-          crash-dev-*.sha256
-          crash.asm
