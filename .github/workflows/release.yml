@@ -6,10 +6,44 @@ on:
       - 'v*'  # Trigger pada push tag yang dimulai dengan 'v'
   workflow_dispatch:  # Memungkinkan trigger manual
 
-jobs:
-  build-and-release:
-    runs-on: windows-latest
+permissions:
+  contents: write  # Diperlukan untuk membuat release
 
+jobs:
+  check-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_exists: ${{ steps.check-tag.outputs.exists }}
+      tag_name: ${{ steps.get-tag.outputs.tag_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Check if tag exists
+        id: check-tag
+        run: |
+          if [ -n "${{ github.ref_type }}" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get tag name
+        id: get-tag
+        run: |
+          if [ -n "${{ github.ref_name }}" ]; then
+            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag_name=dev-build" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    runs-on: windows-latest
+    needs: check-tag
+    if: needs.check-tag.outputs.tag_exists == 'true'
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
@@ -27,14 +61,15 @@ jobs:
     - name: Compile ASM code
       run: |
         ml /c /coff crash.asm
+        if ($LASTEXITCODE -ne 0) { exit 1 }
         link /subsystem:windows crash.obj
+        if ($LASTEXITCODE -ne 0) { exit 1 }
 
-    - name: Create version info
-      id: version
+    - name: Extract version from tag
+      id: get_version
       run: |
-        # Ekstrak versi dari tag (format vX.Y.Z)
-        $tag = "${{ github.ref_name }}"
-        $version = $tag.TrimStart('v')
+        $tag = "${{ needs.check-tag.outputs.tag_name }}"
+        $version = $tag -replace '^v', ''
         echo "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         echo "version=$version" >> $env:GITHUB_OUTPUT
 
@@ -42,33 +77,90 @@ jobs:
       run: |
         Move-Item -Path crash.exe -Destination "crash-${{ env.VERSION }}.exe"
 
-    - name: Create release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ github.ref }}
-        name: Crash System ${{ env.VERSION }}
-        body: |
-           **WARNING: DESTRUCTIVE SOFTWARE** 
-          
-          This release contains highly destructive code that will:
-          - Create visual and audio glitches
-          - Overwrite the Master Boot Record (MBR)
-          - Cause system crash and instability
-          
-          **ONLY USE IN CONTROLLED ENVIRONMENTS**
-          
-          Version: ${{ env.VERSION }}
-          Build date: ${{ github.event.head_commit.timestamp }}
-        files: |
-          crash-${{ env.VERSION }}.exe
-          README.md
-        draft: false
-        prerelease: false
+    - name: Create checksum
+      run: |
+        Get-FileHash -Path "crash-${{ env.VERSION }}.exe" -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ASCII "crash-${{ env.VERSION }}.sha256"
 
-    - name: Upload build artifact
+    - name: Upload build artifacts
       uses: actions/upload-artifact@v3
       with:
         name: crash-system-${{ env.VERSION }}
         path: |
           crash-${{ env.VERSION }}.exe
+          crash-${{ env.VERSION }}.sha256
+          crash.asm
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [check-tag, build]
+    if: needs.check-tag.outputs.tag_exists == 'true'
+    
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: crash-system-${{ needs.check-tag.outputs.tag_name }}
+
+    - name: Create release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ needs.check-tag.outputs.tag_name }}
+        name: Crash System ${{ needs.check-tag.outputs.tag_name }}
+        body: |
+           **WARNING: HIGHLY DESTRUCTIVE SOFTWARE** 
+          
+          This release contains code that will:
+          - Create intense visual and audio glitches
+          - Overwrite the Master Boot Record (MBR)
+          - Cause permanent system damage
+          
+          **ONLY USE IN CONTROLLED VIRTUAL ENVIRONMENTS**
+          
+          Version: ${{ needs.check-tag.outputs.tag_name }}
+          Build date: ${{ github.event.head_commit.timestamp }}
+          SHA256: $(cat crash-${{ needs.check-tag.outputs.tag_name }}.sha256)
+        files: |
+          crash-${{ needs.check-tag.outputs.tag_name }}.exe
+          crash-${{ needs.check-tag.outputs.tag_name }}.sha256
+          crash.asm
+        draft: false
+        prerelease: false
+
+  no-tag-build:
+    runs-on: windows-latest
+    needs: check-tag
+    if: needs.check-tag.outputs.tag_exists == 'false' && github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup MASM32
+      run: |
+        Invoke-WebRequest -Uri "http://www.masm32.com/masmdl.exe" -OutFile "masmdl.exe"
+        Start-Process -Wait -FilePath "masmdl.exe" -ArgumentList "/silent"
+        echo "MASM32_PATH=C:\masm32" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "C:\masm32\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Compile ASM code
+      run: |
+        ml /c /coff crash.asm
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        link /subsystem:windows crash.obj
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+
+    - name: Create dev build
+      run: |
+        $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        Move-Item -Path crash.exe -Destination "crash-dev-$timestamp.exe"
+        Get-FileHash -Path "crash-dev-$timestamp.exe" -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ASCII "crash-dev-$timestamp.sha256"
+
+    - name: Upload dev build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: crash-dev-build
+        path: |
+          crash-dev-*.exe
+          crash-dev-*.sha256
           crash.asm
