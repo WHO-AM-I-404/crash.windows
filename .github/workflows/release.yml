@@ -1,4 +1,4 @@
-name: Build Release
+name: Build and Release ASM EXE
 
 on:
   push:
@@ -10,27 +10,38 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Download Golink
-        run: |
-          Invoke-WebRequest `
-            -Uri "https://github.com/achappell/Golink/releases/download/v1.0.5/golink.exe" `
-            -OutFile "C:\golink.exe" `
-            -Headers @{"Accept"="application/octet-stream"}
+    - name: Install NASM
+      run: choco install nasm -y
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+    - name: Compile crash2.asm to OBJ
+      run: nasm -f win64 crash2.asm -o crash2.obj
 
-      - name: Configure project
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+    - name: Link to EXE
+      run: |
+        gcc crash2.obj -o crash2.exe -lkernel32 -luser32
 
-      - name: Build project
-        run: cmake --build build --config Release
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: crash2-exe
+        path: crash2.exe
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-build
-          path: build/Release/*
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Download Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: crash2-exe
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: crash2.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
