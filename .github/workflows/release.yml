@@ -1,9 +1,9 @@
-name: Build and Release NASM 64-bit Crash
+name: Build and Release NASM 64-bit Crash2
 
 on:
   push:
     tags:
-      - 'v*'  # Trigger pada push tag yang dimulai dengan 'v'
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -15,7 +15,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
@@ -68,7 +68,7 @@ jobs:
         }
 
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: crash2-system-${{ env.VERSION }}-x64
         path: |
@@ -78,7 +78,7 @@ jobs:
 
     - name: Create release
       if: github.ref_type == 'tag'
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.ref_name }}
         name: Crash2 System ${{ github.ref_name }} (64-bit)
