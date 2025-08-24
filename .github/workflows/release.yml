@@ -1,97 +1,36 @@
-name: Build and Release NASM 64-bit Crash2
+name: Build Release
 
 on:
   push:
     tags:
-      - 'v*'
-  workflow_dispatch:
-
-permissions:
-  contents: write
+      - "v*"
 
 jobs:
-  build-nasm-64bit:
+  build:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout source code
+        uses: actions/checkout@v4
 
-    - name: Setup NASM
-      run: |
-        Invoke-WebRequest -Uri "https://www.nasm.us/pub/nasm/releasebuilds/2.16.01/win64/nasm-2.16.01-win64.zip" -OutFile "nasm.zip"
-        Expand-Archive -Path nasm.zip -DestinationPath nasm
-        echo "$PWD\\nasm" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Download Golink
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/achappell/Golink/releases/download/v1.0.5/golink.exe" `
+            -OutFile "C:\golink.exe" `
+            -Headers @{"Accept"="application/octet-stream"}
 
-    - name: Setup GoLink
-      run: |
-        Invoke-WebRequest -Uri "https://github.com/achappell/Golink/releases/download/v1.0.5/golink.exe" -OutFile "golink.exe"
-        echo "$PWD" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
 
-    - name: Compile crash2.asm
-      run: |
-        nasm -f win64 crash2.asm -o crash2.obj
+      - name: Configure project
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
-    - name: Link to create EXE
-      run: |
-        golink /entry main /console crash2.obj kernel32.dll user32.dll advapi32.dll gdi32.dll
-        Rename-Item crash2.exe crash.exe
+      - name: Build project
+        run: cmake --build build --config Release
 
-    - name: Extract version from tag
-      id: get_version
-      run: |
-        if ("${{ github.ref_type }}" -eq "tag") {
-          $tag = "${{ github.ref_name }}"
-          $version = $tag -replace '^v', ''
-          echo "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        } else {
-          echo "VERSION=dev" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        }
-
-    - name: Rename binary with version
-      run: |
-        if ("${{ env.VERSION }}" -ne "dev") {
-          Rename-Item crash.exe "crash2-${{ env.VERSION }}-x64.exe"
-        } else {
-          $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-          Rename-Item crash.exe "crash2-dev-$timestamp-x64.exe"
-        }
-
-    - name: Create checksum
-      run: |
-        Get-ChildItem crash2-*.exe | ForEach-Object {
-          $hash = Get-FileHash $_.FullName -Algorithm SHA256 | Select-Object -ExpandProperty Hash
-          $shaFile = "$($_.BaseName).sha256"
-          $hash | Out-File -Encoding ASCII $shaFile
-        }
-
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: crash2-system-${{ env.VERSION }}-x64
-        path: |
-          crash2-*.exe
-          crash2-*.sha256
-          crash2.asm
-
-    - name: Create release
-      if: github.ref_type == 'tag'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ github.ref_name }}
-        name: Crash2 System ${{ github.ref_name }} (64-bit)
-        body: |
-          **ONLY USE IN CONTROLLED VIRTUAL ENVIRONMENTS**
-
-          Version: ${{ github.ref_name }}
-          Architecture: x64
-          Build date: ${{ github.event.head_commit.timestamp }}
-          SHA256: $(Get-Content crash2-${{ env.VERSION }}-x64.sha256)
-        files: |
-          crash2-${{ env.VERSION }}-x64.exe
-          crash2-${{ env.VERSION }}-x64.sha256
-          crash2.asm
-        draft: false
-        prerelease: false
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-build
+          path: build/Release/*
